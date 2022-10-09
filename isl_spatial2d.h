@@ -11,7 +11,7 @@
  *   #define STB_DS_IMPLEMENTATION 
  * Probably in the future the good idea will be to include parts of stb_ds into this lib
  * directly or put here more basic implementation of hash tables and implement dynamic
- * arrays using realloc. Tested on stb_ds version 0.67.
+ * arrays using realloc.
  *
  * QUICK NOTES:
  *   
@@ -24,6 +24,7 @@
  *   Key used in a spatial hash is plain int, because we store 2 coordinates in the same
  *   key the size limit is bounded to half size of int, i.e. if int is 32 bits, 
  *   coordinates (after dividing by cell size) are limited to [-65535, 65535] (16 bits).
+ *
  *
  * Initialization:
  *   struct isls2d sh;
@@ -40,6 +41,11 @@
  *
  * Update entity:
  *   isls2d_update(&sh, id, new_x, new_y, new_width, new_height);  
+ *
+ *
+ * Additional compilation defines:
+ *   ISL_SPATIAL2D_STATIC - static compilation
+ *   ISL_SPATIAL2D_DOUBLE - use doubles instead of floats
  *
  * LICENSE
  *
@@ -62,12 +68,22 @@
 #define ISLS2D_X(key) ((x)/ISLS2D_XMULT)
 #define ISLS2D_Y(key) ((y)%ISLS2D_XMULT)
 
+#ifndef ISL_SPATIAL2D_DOUBLE
+#define isls2d_float  float
+#define isls2d__floor floorf
+#define isls2d__ceil  ceilf
+#else
+#define isls2d_float  double
+#define isls2d__floor floor
+#define isls2d__ceil  ceil
+#endif
+
 struct isls2d_entity {
 	int id;
-	float x;
-	float y;
-	float width;
-	float height;
+	isls2d_float x;
+	isls2d_float y;
+	isls2d_float width;
+	isls2d_float height;
 	int xmin;
 	int xmax;
 	int ymin;
@@ -79,19 +95,19 @@ struct isls2d {
 	struct {int key; int *value;} *cells;
 	struct isls2d_entity *entities;
 	int *reusable_ids;
-	float inv_cell_width;
-	float inv_cell_height;
+	isls2d_float inv_cell_width;
+	isls2d_float inv_cell_height;
 };
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-ISLS2D_DEF void isls2d_init(struct isls2d *sh, float cell_width, float cell_height);
+ISLS2D_DEF void isls2d_init(struct isls2d *sh, isls2d_float cell_width, isls2d_float cell_height);
 ISLS2D_DEF void isls2d_clear(struct isls2d *sh);
-ISLS2D_DEF int isls2d_insert(struct isls2d *sh, float x, float y, float width, float height, const void *data);
+ISLS2D_DEF int isls2d_insert(struct isls2d *sh, isls2d_float x, isls2d_float y, isls2d_float width, isls2d_float height, const void *data);
 ISLS2D_DEF void isls2d_remove(struct isls2d *sh, int id);
-ISLS2D_DEF void isls2d_update(struct isls2d *sh, int id, float x, float y, float width, float height);
+ISLS2D_DEF void isls2d_update(struct isls2d *sh, int id, isls2d_float x, isls2d_float y, isls2d_float width, isls2d_float height);
 
 #ifdef __cplusplus
 }
@@ -141,7 +157,7 @@ void isls2d__remove_entity_from_cells(struct isls2d *sh, int id, int xmin, int x
 	}
 }
 
-void isls2d_init(struct isls2d *sh, float cell_width, float cell_height) {
+void isls2d_init(struct isls2d *sh, isls2d_float cell_width, isls2d_float cell_height) {
 	*sh = (struct isls2d) {NULL, NULL, NULL, 1.0f / cell_width, 1.0f / cell_height};
 }
 
@@ -158,17 +174,17 @@ void isls2d_clear(struct isls2d *sh) {
 	sh->reusable_ids = NULL;
 }
 
-int isls2d_insert(struct isls2d *sh, float x, float y, float width, float height, const void *data) {
+int isls2d_insert(struct isls2d *sh, isls2d_float x, isls2d_float y, isls2d_float width, isls2d_float height, const void *data) {
 	int id;
 	if (arrlen(sh->reusable_ids)) {
 		id = arrpop(sh->reusable_ids);
 	} else {
 		id = arrlen(sh->entities);
 	}
-	int xmin = floorf(x * sh->inv_cell_width);
-	int xmax = ceilf((x + width) * sh->inv_cell_width);
-	int ymin = floorf(y * sh->inv_cell_height);
-	int ymax = ceilf((y + height) * sh->inv_cell_height);
+	int xmin = isls2d__floor(x * sh->inv_cell_width);
+	int xmax = isls2d__ceil((x + width) * sh->inv_cell_width);
+	int ymin = isls2d__floor(y * sh->inv_cell_height);
+	int ymax = isls2d__ceil((y + height) * sh->inv_cell_height);
 	struct isls2d_entity entity = (struct isls2d_entity) {id, x, y, width, height, xmin, xmax, ymin, ymax, data};
 	arrput(sh->entities, entity);
 	isls2d__insert_entity_into_cells(sh, id, xmin, xmax, ymin, ymax);
@@ -188,14 +204,14 @@ void isls2d_remove(struct isls2d *sh, int id) {
 	}
 }
 
-void isls2d_update(struct isls2d *sh, int id, float x, float y, float width, float height) {
+void isls2d_update(struct isls2d *sh, int id, isls2d_float x, isls2d_float y, isls2d_float width, isls2d_float height) {
 	if (id >= arrlen(sh->entities)) return;
 	struct isls2d_entity entity = sh->entities[id];
 	if (entity.id != id) return;
-	int xmin = floorf(x * sh->inv_cell_width);
-	int xmax = ceilf((x + width) * sh->inv_cell_width);
-	int ymin = floorf(y * sh->inv_cell_height);
-	int ymax = ceilf((y + height) * sh->inv_cell_height);
+	int xmin = isls2d__floor(x * sh->inv_cell_width);
+	int xmax = isls2d__ceil((x + width) * sh->inv_cell_width);
+	int ymin = isls2d__floor(y * sh->inv_cell_height);
+	int ymax = isls2d__ceil((y + height) * sh->inv_cell_height);
 	if (xmin != entity.xmin || xmax != entity.xmax || ymin != entity.ymin || ymax != entity.ymax) {
 		isls2d__remove_entity_from_cells(sh, id, entity.xmin, entity.xmax, entity.ymin, entity.ymax);
 		isls2d__insert_entity_into_cells(sh, id, xmin, xmax, ymin, ymax);
