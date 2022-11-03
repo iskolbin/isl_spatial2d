@@ -1,5 +1,5 @@
-#ifndef ISL_SPATIAL2D_H_
-#define ISL_SPATIAL2D_H_
+#ifndef ISL_INCLUDE_SPATIAL2D_H_
+#define ISL_INCLUDE_SPATIAL2D_H_
 
 /* isl_spatial2d - v0.1 - public domain spatial hashing in 2d space
  * no warranty implied; use at your own risk
@@ -89,6 +89,7 @@ struct isls2d_entity {
 	int ymin;
 	int ymax;
 	const void *data;
+	struct {int key; bool value;} *overlaps;
 };
 
 struct isls2d {
@@ -97,6 +98,7 @@ struct isls2d {
 	int *reusable_ids;
 	isls2d_float inv_cell_width;
 	isls2d_float inv_cell_height;
+	bool track_overlap;
 };
 
 #ifdef __cplusplus
@@ -108,11 +110,12 @@ ISLS2D_DEF void isls2d_clear(struct isls2d *sh);
 ISLS2D_DEF int isls2d_insert(struct isls2d *sh, isls2d_float x, isls2d_float y, isls2d_float width, isls2d_float height, const void *data);
 ISLS2D_DEF void isls2d_remove(struct isls2d *sh, int id);
 ISLS2D_DEF void isls2d_update(struct isls2d *sh, int id, isls2d_float x, isls2d_float y, isls2d_float width, isls2d_float height);
+#define isls2d_overlaps(x1,y1,w1,h1,x2,y2,w2,h2) ((x1)+(w1)>(x2)&&(x2)+(w2)>(x1)&&(y1)+(h1)>(y2)&&(y2)+(h2)>(y1))
 
 #ifdef __cplusplus
 }
 #endif
-#endif // ISL_SPATIAL2D_H_
+#endif // ISL_INCLUDE_SPATIAL2D_H_
 
 #ifdef ISL_SPATIAL2D_IMPLEMENTATION
 #ifndef ISL_SPATIAL2D_IMPLEMENTATION_ONCE 
@@ -123,16 +126,58 @@ ISLS2D_DEF void isls2d_update(struct isls2d *sh, int id, isls2d_float x, isls2d_
 
 #include <math.h>
 
-static void isls2d__insert_entity_into_cells(struct isls2d *sh, int id, int xmin, int xmax, int ymin, int ymax);
-static void isls2d__remove_entity_from_cells(struct isls2d *sh, int id, int xmin, int xmax, int ymin, int ymax);
+static int *isls2d__arrsorted_put_if_absent(int *a, int v);
+static int *isls2d__arrsorted_del(int *a, int v);
+static void isls2d__insert_entity_into_cells(struct isls2d *sh, struct isls2d_entity *e);
+static void isls2d__remove_entity_from_cells(struct isls2d *sh, struct isls2d_entity *e);
 
-void isls2d__insert_entity_into_cells(struct isls2d *sh, int id, int xmin, int xmax, int ymin, int ymax) {
-	for (int x = xmin; x < xmax; x++) {
+
+int *isls2d__arrsorted_put_if_absent(int *a, int v) {
+	int n = arrlen(a), l = 0, r = n - 1, m = (l + r) >> 1;
+	while (l <= r) {
+		if (a[m] < v)      l = m + 1;
+		else if (a[m] > v) r = m - 1;
+		else return a;
+		m = (l + r) >> 1;
+	}
+	arrins(a, l, v);
+	return a;
+}
+
+int *isls2d__arrsorted_del(int *a, int v) {
+	int n = arrlen(a), l = 0, r = n - 1, m = (l + r) >> 1;
+	while (l <= r) {
+		if (a[m] < v)      l = m + 1;
+		else if (a[m] > v) r = m - 1;
+		else {
+			arrdel(a, m);
+			return a;
+		}
+		m = (l + r) >> 1;
+	}
+	return a;
+}
+
+void isls2d__insert_entity_into_cells(struct isls2d *sh, struct isls2d_entity *e) {
+	int id = e->id, xmin = e->xmin, xmax = e->xmax, ymin = e->ymin, ymax = e->ymax;
+	for (int x = e->xmin; x < xmax; x++) {
 		for (int y = ymin; y < ymax; y++) {
 			int key = ISLS2D_KEY(x, y);
-			int *ids = hmget(sh->cells, key);
-			arrput(ids, id);
-			if (arrlen(ids) == 1) hmput(sh->cells, key, ids);
+			int *cell_ids = hmget(sh->cells, key);
+			int n = arrlen(cell_ids);
+			if (track_overlap) {
+				for (int i = 0; i < n; i++) {
+					struct isls2d_entity *o = &sh->entities[i];
+					if (isls2d_overlaps(e->x, e->y, e->width, e->height, o->x, o->y, o->width, o->height)) {
+						isls2d__arrsorted_put_if_absent(e->overlaps, o->id);
+						isls2d__arrsorted_put_if_absent(o->overlaps, e->id);
+						//hmput(e->overlaps, o->id, true);
+						//hmput(o->overlaps, e->id, true);
+					}
+				}
+			}
+			arrput(cell_ids, id);
+			if (n == 1) hmput(sh->cells, key, cell_ids);
 		}
 	}
 }
@@ -141,15 +186,24 @@ void isls2d__remove_entity_from_cells(struct isls2d *sh, int id, int xmin, int x
 	for (int x = xmin; x < xmax; x++) {
 		for (int y = ymin; y < ymax; y++) {
 			int key = ISLS2D_KEY(x, y);
-			int *ids = hmget(sh->cells, key);
-			int n = arrlen(ids);
+			int *cell_ids = hmget(sh->cells, key);
+			int n = arrlen(cell_ids);
 			for (int i = 0; i < n; i++) {
 				if (ids[i] == id) {
-					arrdelswap(ids, i);
+					arrdelswap(cell_ids, i);
+					if (track_overlap) {
+						for (int j = 0; j < n-1; j++) {
+							struct isls2d_entity *o = &sh->entities[i];
+							isls2d__arrsorted_del(e->overlaps, o->id);
+							isls2d__arrsorted_del(o->overlaps, e->id);
+							//hmdel(e->overlaps, o->id);
+							//hmdel(o->overlaps, e->id);
+						}
+					}
 					break;		
 				}
 			}
-			if (arrlen(ids) == 0) {
+			if (arrlen(cell_ids) == 0) {
 				arrfree(ids);
 				(void)hmdel(sh->cells, key);
 			}
@@ -167,6 +221,12 @@ void isls2d_clear(struct isls2d *sh) {
 		arrfree(sh->cells[i].value);
 	}
 	hmfree(sh->cells);
+	n = arrlen(sh->entities);
+	for (int i = 0; i < n; i++) {
+		//hmfree(sh->entities[i].overlaps);
+		arrfree(sh->entities[i].overlaps);
+		sh->entities[i].overlaps = NULL;
+	}
 	arrfree(sh->entities);
 	arrfree(sh->reusable_ids);
 	sh->cells = NULL;
@@ -176,17 +236,18 @@ void isls2d_clear(struct isls2d *sh) {
 
 int isls2d_insert(struct isls2d *sh, isls2d_float x, isls2d_float y, isls2d_float width, isls2d_float height, const void *data) {
 	int id;
-	if (arrlen(sh->reusable_ids)) {
-		id = arrpop(sh->reusable_ids);
-	} else {
-		id = arrlen(sh->entities);
-	}
 	int xmin = isls2d__floor(x * sh->inv_cell_width);
 	int xmax = isls2d__ceil((x + width) * sh->inv_cell_width);
 	int ymin = isls2d__floor(y * sh->inv_cell_height);
 	int ymax = isls2d__ceil((y + height) * sh->inv_cell_height);
-	struct isls2d_entity entity = (struct isls2d_entity) {id, x, y, width, height, xmin, xmax, ymin, ymax, data};
-	arrput(sh->entities, entity);
+	struct isls2d_entity entity = (struct isls2d_entity) {-1, x, y, width, height, xmin, xmax, ymin, ymax, data, NULL};
+	if (arrlen(sh->reusable_ids) > 0) {
+		entity.id = arrpop(sh->reusable_ids);
+		sh->entities[entity.id] = entity;
+	} else {
+		entity.id = arrlen(sh->entities);
+		arrpush(sh->entities, entity);
+	}
 	isls2d__insert_entity_into_cells(sh, id, xmin, xmax, ymin, ymax);
 	return id;
 }
@@ -196,11 +257,17 @@ void isls2d_remove(struct isls2d *sh, int id) {
 	struct isls2d_entity entity = sh->entities[id];
 	if (entity.id != id) return;
 	isls2d__remove_entity_from_cells(sh, id, entity.xmin, entity.xmax, entity.ymin, entity.ymax);
+	sh->entities[id].id = -1;
+	int n = arrlen(sh->entities[id].overlaps);
+	for (int i = 0; i < n; i++) {
+		isls2d__arrsorted_del(sh->entities[i].overlaps, id);
+	}
+	arrfree(sh->entities[id].overlaps);
+	sh->entities[id].overlaps = NULL;
 	if (id == arrlen(sh->entities)) {
-		arrdelswap(sh->entities, id);
+		(void)arrpop(sh->entities);
 	} else {
-		arrput(sh->reusable_ids, id);
-		sh->entities[id].id = -1;
+		(void)arrput(sh->reusable_ids, id);
 	}
 }
 
@@ -212,14 +279,13 @@ void isls2d_update(struct isls2d *sh, int id, isls2d_float x, isls2d_float y, is
 	int xmax = isls2d__ceil((x + width) * sh->inv_cell_width);
 	int ymin = isls2d__floor(y * sh->inv_cell_height);
 	int ymax = isls2d__ceil((y + height) * sh->inv_cell_height);
-	if (xmin != entity.xmin || xmax != entity.xmax || ymin != entity.ymin || ymax != entity.ymax) {
+	if (sh->track_overlap || xmin != entity.xmin || xmax != entity.xmax || ymin != entity.ymin || ymax != entity.ymax) {
 		isls2d__remove_entity_from_cells(sh, id, entity.xmin, entity.xmax, entity.ymin, entity.ymax);
 		isls2d__insert_entity_into_cells(sh, id, xmin, xmax, ymin, ymax);
 	}
-	sh->entities[id] = (struct isls2d_entity) {entity.id, x, y, width, height, xmin, xmax, ymin, ymax, entity.data};
+	sh->entities[id] = (struct isls2d_entity) {entity.id, x, y, width, height, xmin, xmax, ymin, ymax, entity.data, entity.overlaps};
 }
 
-  
 /*
 ------------------------------------------------------------------------------
 This software is available under 2 licenses -- choose whichever you prefer.
